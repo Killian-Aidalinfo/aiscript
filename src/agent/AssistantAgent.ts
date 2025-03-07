@@ -54,17 +54,25 @@ class AssistantAgent {
     if (config == null) {
       throw new Error("llm_config is required");
     }
+    
+    // Configuration pour OpenAI
     if (config.api_type === "openai") {
+      console.log("Setting up OpenAI API client");
       return new OpenAI({
         apiKey: config.api_key,
       });
     }
+    
+    // Configuration pour Ollama
     if (config.api_type === "ollama") {
+      console.log("Setting up Ollama API client with baseURL:", config.baseURL);
       return new OpenAI({
         baseURL: config.baseURL,
-        apiKey: config.api_key,
+        apiKey: "sk-no-key-required",  // Ollama n'a pas besoin de clé API réelle
       });
     }
+    
+    throw new Error(`Unknown API type: ${config.api_type}`);
   }
 
   async run(prompt: string) {
@@ -76,22 +84,83 @@ class AssistantAgent {
     let response = "";
 
     if (this.functions) {
-      console.log("Running with tools...");
+      // Configurer un gestionnaire d'événements personnalisé pour les messages
+      console.log("Initializing AI with tools...");
+      
+      // Ajouter des instructions adaptées au moteur d'IA utilisé (OpenAI vs Ollama)
+      const isOpenAI = this.llm_config.api_type === "openai";
+      
+      if (isOpenAI) {
+        // Instructions spécifiques pour OpenAI qui a des restrictions sur les noms d'outils
+        messages.push({
+          role: "system",
+          content: "IMPORTANT: When using tools, you must use ONLY the exact tool names as defined (fileSystemTool, fileSearchTool, or bashExecutorTool). Never add operations or methods to the tool name with dots."
+        });
+      }
+      
+      // Configuration commune pour les deux moteurs
+      const runnerConfig = {
+        model: this.llm_config.model,
+        messages: messages,
+        tools: this.functions,
+      };
+      
+      // Ajouter baseURL pour Ollama si nécessaire
+      if (this.llm_config.baseURL) {
+        // @ts-ignore - Ignorer l'erreur de type car baseURL n'est pas dans les types officiels
+        runnerConfig.baseURL = this.llm_config.baseURL;
+      }
+      
       const runner = this.wrapper.beta.chat.completions
-        .runTools({
-          model: this.llm_config.model,
-          messages: messages,
-          tools: this.functions, // passage de vos outils
-        })
-        .on("message", (message) => console.log("messages", message));
+        .runTools(runnerConfig)
+        .on("message", (message: any) => {
+          // Gérer spécifiquement les appels d'outils
+          if (message.role === "assistant" && message.tool_calls && message.tool_calls.length > 0) {
+            // Vérifier si l'appel d'outil est valide et afficher les informations
+            try {
+              const toolCall = message.tool_calls[0];
+              const toolName = toolCall.function.name;
+              
+              // Vérifier si nous utilisons OpenAI et si le nom est valide
+              const isOpenAI = this.llm_config.api_type === "openai";
+              
+              if (isOpenAI && (toolName.includes(".") || !/^[a-zA-Z0-9_-]+$/.test(toolName))) {
+                console.log(`\x1b[31m⚠️ Invalid tool name: ${toolName}. OpenAI requires simple tool names without dots.\x1b[0m`);
+                // Ne pas continuer l'affichage pour éviter la confusion avec OpenAI
+                return;
+              }
+              
+              // Extraire l'opération des arguments pour l'affichage
+              let operation = "";
+              try {
+                const args = JSON.parse(toolCall.function.arguments);
+                if (args.operation) {
+                  operation = args.operation;
+                }
+              } catch (e) {
+                // Ignorer les erreurs de parsing
+              }
+              
+              // Afficher l'outil et l'opération
+              const displayText = operation ? `${toolName} (${operation})` : toolName;
+              console.log(`\x1b[33m🔧 Using tool: ${displayText}\x1b[0m`);
+            } catch (e) {
+              console.log(`\x1b[31m⚠️ Error processing tool call\x1b[0m`);
+            }
+          } else if (message.role === "tool") {
+            // Pour les résultats d'outils, montrer seulement une indication discrète
+            const toolId = message.tool_call_id;
+            console.log(`\x1b[32m✓ Tool completed\x1b[0m`);
+          }
+          // Ne pas afficher les autres messages
+        });
+      
+      // Obtenir le contenu final et l'afficher
       const finalContent = await runner.finalContent();
-      console.log();
-      console.log("Final content:", finalContent);
-      // console.log("Result: ", result);
-      // // Convertir le résultat en chaîne si ce n'est pas déjà une chaîne
-      // const resultStr =
-      //   typeof result === "string" ? result : JSON.stringify(result);
-      // process.stdout.write(resultStr);
+      
+      // Afficher le contenu final sans préfixe
+      process.stdout.write(finalContent);
+      
       response = finalContent;
     } else {
       // Sinon, on utilise le flux standard
@@ -108,10 +177,10 @@ class AssistantAgent {
       }
     }
 
-    console.log("\nResponse completed.");
-
+    // Ne pas afficher "Response completed"
+    
     if (response.toUpperCase().includes("TERMINATE")) {
-      console.log("TERMINATE: Ending the session.");
+      console.log("\n\x1b[36mTERMINATE: Ending the session.\x1b[0m");
       this.rl.close();
       return;
     }
