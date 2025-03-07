@@ -1,113 +1,69 @@
 import { AssistantAgent } from "./agent/AssistantAgent";
-import { BashTool } from "./tools/BashTool";
-import { GlobTool } from "./tools/GlobTool";
-import { GrepTool } from "./tools/GrepTool";
-import { LSTool } from "./tools/LSTool";
-import { FileReadTool } from "./tools/FileReadTool";
-import { FileEditTool } from "./tools/FileEditTool";
-import { FileWriteTool } from "./tools/FileWriteTool";
-
-// Create instances of our tools
-const bashTool = new BashTool();
-const globTool = new GlobTool();
-const grepTool = new GrepTool();
-const lsTool = new LSTool();
-const fileReadTool = new FileReadTool();
-const fileEditTool = new FileEditTool();
-const fileWriteTool = new FileWriteTool();
+import { fileSystemTool } from "./tools/filesystem";
+import { fileSearchTool } from "./tools/fileSearchTool"; // notre nouvel outil
+import { bashExecutorTool } from "./tools/BashTool";
 
 const tools = [
   {
     type: "function",
     function: {
-      name: "bashTool",
-      function: (params: any) => bashTool.execute(params),
+      name: "fileSystemTool",
+      function: fileSystemTool,
     },
   },
   {
     type: "function",
     function: {
-      name: "globTool",
-      function: (params: any) => globTool.execute(params),
+      name: "fileSearchTool",
+      function: fileSearchTool,
     },
   },
   {
     type: "function",
     function: {
-      name: "grepTool",
-      function: (params: any) => grepTool.execute(params),
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "lsTool",
-      function: (params: any) => lsTool.execute(params),
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fileReadTool",
-      function: (params: any) => fileReadTool.execute(params),
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fileEditTool",
-      function: (params: any) => fileEditTool.execute(params),
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fileWriteTool",
-      function: (params: any) => fileWriteTool.execute(params),
+      name: "bashExecutorTool",
+      function: bashExecutorTool,
     },
   },
 ];
 
 // Configuration pour l'API OpenAI
+// const llm_config = {
+//   api_type: "ollama",
+//   model: "llama3.2",
+//   baseURL: "http://localhost:11434/v1",
+//   api_key: process.env.OPENAI_API_KEY,
+// };
+
 const llm_config = {
-  api_type: "ollama",
-  model: "llama3.2",
-  baseURL: "http://localhost:11434/v1",
-  api_key: process.env.OPENAI_API_KEY ?? "",
+  api_type: "openai",
+  model: "gpt-4o-mini",
+  //   baseURL: "http://localhost:11434/v1",
+  api_key: process.env.OPENAI_API_KEY,
 };
 
 const my_agent = new AssistantAgent(
   "helpful_agent",
-  `You are a helpful AI assistant. 
-  Per default your are in current directory use pwd to know where you are.
-  You have access to the following tools:
-1. bashTool:
-   - To execute shell commands: { "command": "your-shell-command", "timeout": 30000 }
+  `You are a helpful AI assistant. When you need to execute file system operations, use the following tools:
+  
+1. fileSystemTool:
+   - Create a directory: { "operation": "createDirectory", "filePath": "path/to/directory" }
+   - Create a file: { "operation": "create", "filePath": "path/to/file", "content": "the content to write" }
 
-2. globTool:
-   - To find files using glob patterns: { "pattern": "**/*.js", "path": "/path/to/search" }
+2. fileSearchTool:
+   - Find files by name: { "operation": "find", "directory": "path/to/search", "pattern": "file name fragment", "recursive": true }
+   - Search within files: { "operation": "grep", "directory": "path/to/search", "pattern": "text to search", "recursive": true }
 
-3. grepTool:
-   - To search file contents: { "pattern": "search text", "path": "/path/to/search", "include": "*.ts" }
+3. bashExecutorTool:
+   - Execute any bash command: { "command": "your bash command here" }
 
-4. lsTool:
-   - To list directory contents: { "path": "/path/to/directory", "ignore": ["node_modules", "*.log"] }
-
-5. fileReadTool:
-   - To read file contents: { "file_path": "/path/to/file.txt", "offset": 0, "limit": 2000 }
-
-6. fileEditTool:
-   - To edit files: { "file_path": "/path/to/file.txt", "old_string": "text to replace", "new_string": "replacement text" }
-
-7. fileWriteTool:
-   - To write files: { "file_path": "/path/to/file.txt", "content": "file content to write" }
-
-Please generate the appropriate function calls using these tools.`,
+Please generate the function call using these keys.`,
   "You are a poetic AI assistant, respond in rhyme.",
   llm_config,
   tools
 );
 
+// await my_agent.run("Peux-tu exécuter la commande 'ls -l /tmp' ?");
 await my_agent.run(
-  "Pourrais tu me créer un dossier nommé test avec dedans un fichier hello world.txt contenant du text en latin ramdom"
+  "Pourrais-tu m'expliquer le projet dans son ensemble ? Le projet ce situe dans /home/killian/Documents/dev-aidalinfo/PROJET-pulse-myIT. Utilise l'ensemble des outils pour parcourir les fichiers qui te semble utils et comprendre toute la structure du projet. Ignore les fichiers ou tu n'a pas accès."
 );

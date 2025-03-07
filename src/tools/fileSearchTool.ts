@@ -3,6 +3,37 @@ import fs from "fs/promises";
 import path from "path";
 import process from "process";
 
+interface SearchArgs {
+  operation: "find" | "grep";
+  directory: string;
+  pattern: string;
+  recursive?: boolean;
+}
+
+async function traverseDirectory(
+  currentDir: string,
+  recursive: boolean,
+  fileCallback: (filePath: string) => Promise<void>
+): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(currentDir, { withFileTypes: true });
+  } catch (err) {
+    // On ignore les erreurs de lecture pour ce répertoire
+    return;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      if (recursive) {
+        await traverseDirectory(fullPath, recursive, fileCallback);
+      }
+    } else if (entry.isFile()) {
+      await fileCallback(fullPath);
+    }
+  }
+}
+
 export async function fileSearchTool(args: any): Promise<string> {
   // Parsing si args est une chaîne
   if (typeof args === "string") {
@@ -13,16 +44,22 @@ export async function fileSearchTool(args: any): Promise<string> {
     }
   }
 
-  // Validation des clés requises
-  const { operation, directory, pattern, recursive } = args;
-  if (!operation || typeof operation !== "string") {
-    return "Erreur: La clé 'operation' est requise et doit être une chaîne ('find' ou 'grep').";
+  // Validation des clés requises et typage
+  const { operation, directory, pattern } = args;
+  let recursive: boolean = args.recursive === true;
+
+  if (
+    !operation ||
+    typeof operation !== "string" ||
+    !["find", "grep"].includes(operation)
+  ) {
+    return "Erreur: La clé 'operation' est requise et doit être 'find' ou 'grep'.";
   }
   if (!directory || typeof directory !== "string") {
     return "Erreur: La clé 'directory' est requise et doit être une chaîne.";
   }
-  if (!pattern || typeof pattern !== "string") {
-    return "Erreur: La clé 'pattern' est requise et doit être une chaîne.";
+  if (!pattern || typeof pattern !== "string" || pattern.trim() === "") {
+    return "Erreur: La clé 'pattern' est requise et doit être une chaîne non vide.";
   }
 
   // Normalisation du répertoire
@@ -32,36 +69,25 @@ export async function fileSearchTool(args: any): Promise<string> {
   }
   dirPath = path.resolve(dirPath);
 
+  // Vérifier que le répertoire existe
   try {
-    // Vérifier que le répertoire existe
     await fs.access(dirPath);
   } catch {
     return `Erreur: Le répertoire "${dirPath}" n'existe pas ou n'est pas accessible.`;
   }
 
+  // Fonction de traitement pour chaque fichier
+  const lowerPattern = pattern.toLowerCase();
+  let results: string[] = [];
+
   if (operation === "find") {
-    let results: string[] = [];
-    async function traverse(currentDir: string) {
-      let entries;
-      try {
-        entries = await fs.readdir(currentDir, { withFileTypes: true });
-      } catch (err: any) {
-        return;
+    // Pour "find", on cherche dans le nom des fichiers
+    await traverseDirectory(dirPath, recursive, async (filePath) => {
+      const fileName = path.basename(filePath).toLowerCase();
+      if (fileName.includes(lowerPattern)) {
+        results.push(filePath);
       }
-      for (const entry of entries) {
-        const fullPath = path.join(currentDir, entry.name);
-        if (entry.isDirectory()) {
-          if (recursive) {
-            await traverse(fullPath);
-          }
-        } else if (entry.isFile()) {
-          if (entry.name.toLowerCase().includes(pattern.toLowerCase())) {
-            results.push(fullPath);
-          }
-        }
-      }
-    }
-    await traverse(dirPath);
+    });
     return JSON.stringify(
       {
         status: "success",
@@ -73,36 +99,20 @@ export async function fileSearchTool(args: any): Promise<string> {
       2
     );
   } else if (operation === "grep") {
-    let results: string[] = [];
-    async function traverse(currentDir: string) {
-      let entries;
+    // Pour "grep", on recherche dans le contenu des fichiers
+    await traverseDirectory(dirPath, recursive, async (filePath) => {
       try {
-        entries = await fs.readdir(currentDir, { withFileTypes: true });
-      } catch (err: any) {
-        return;
-      }
-      for (const entry of entries) {
-        const fullPath = path.join(currentDir, entry.name);
-        if (entry.isDirectory()) {
-          if (recursive) {
-            await traverse(fullPath);
+        const content = await fs.readFile(filePath, "utf8");
+        const lines = content.split("\n");
+        lines.forEach((line, index) => {
+          if (line.toLowerCase().includes(lowerPattern)) {
+            results.push(`${filePath} [ligne ${index + 1}]: ${line}`);
           }
-        } else if (entry.isFile()) {
-          try {
-            const content = await fs.readFile(fullPath, "utf8");
-            const lines = content.split("\n");
-            lines.forEach((line, index) => {
-              if (line.toLowerCase().includes(pattern.toLowerCase())) {
-                results.push(`${fullPath} [ligne ${index + 1}]: ${line}`);
-              }
-            });
-          } catch (err: any) {
-            // Ignorer les erreurs de lecture
-          }
-        }
+        });
+      } catch (err) {
+        // Ignorer les erreurs de lecture pour ce fichier
       }
-    }
-    await traverse(dirPath);
+    });
     return JSON.stringify(
       {
         status: "success",
