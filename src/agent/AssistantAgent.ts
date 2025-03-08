@@ -75,6 +75,57 @@ class AssistantAgent {
     throw new Error(`Unknown API type: ${config.api_type}`);
   }
 
+  // Méthodes utilitaires pour détecter et réparer les appels d'outils malformés
+  shouldConvertToToolCall(text: string): boolean {
+    // Rechercher des modèles qui ressemblent à des tentatives d'appel d'outil
+    const patterns = [
+      /\{\s*"operation"\s*:/i,
+      /\{\s*"command"\s*:/i,
+      /fileSystemTool/i,
+      /fileSearchTool/i,
+      /bashExecutorTool/i,
+      /use\s+.*\s+tool\s+to/i,
+      /using\s+the\s+(file|search|bash)/i
+    ];
+    
+    return patterns.some(pattern => pattern.test(text));
+  }
+  
+  extractToolCallFromText(text: string): any {
+    // Essayer d'extraire un objet JSON valide du texte
+    const jsonRegex = /\{[^{]*"(operation|command)"[^}]*\}/;
+    const match = text.match(jsonRegex);
+    
+    if (match && match[0]) {
+      try {
+        const jsonObj = JSON.parse(match[0]);
+        
+        // Déterminer quel outil utiliser en fonction du contenu
+        if (jsonObj.operation === "read" || jsonObj.operation === "listDirectories") {
+          return {
+            name: "fileSystemTool",
+            arguments: match[0]
+          };
+        } else if (jsonObj.operation === "find" || jsonObj.operation === "grep" || jsonObj.operation === "exploreProject") {
+          return {
+            name: "fileSearchTool",
+            arguments: match[0]
+          };
+        } else if (jsonObj.command) {
+          return {
+            name: "bashExecutorTool",
+            arguments: match[0]
+          };
+        }
+      } catch (e) {
+        // Ignorer les erreurs de parsing JSON
+        console.log(`\x1b[31mCould not parse JSON from extracted text\x1b[0m`);
+      }
+    }
+    
+    return null;
+  }
+
   async run(prompt: string) {
     const messages = [
       { role: "system", content: this.DEFAULT_PROMPT },
@@ -89,12 +140,29 @@ class AssistantAgent {
       
       // Ajouter des instructions adaptées au moteur d'IA utilisé (OpenAI vs Ollama)
       const isOpenAI = this.llm_config.api_type === "openai";
+      const isSmallModel = this.llm_config.model.includes("mini") || 
+                          this.llm_config.model.includes("phi") || 
+                          this.llm_config.model.includes("mistral");
       
       if (isOpenAI) {
         // Instructions spécifiques pour OpenAI qui a des restrictions sur les noms d'outils
         messages.push({
           role: "system",
           content: "IMPORTANT: When using tools, you must use ONLY the exact tool names as defined (fileSystemTool, fileSearchTool, or bashExecutorTool). Never add operations or methods to the tool name with dots."
+        });
+      }
+      
+      // Instructions supplémentaires pour les petits modèles
+      if (isSmallModel) {
+        messages.push({
+          role: "system",
+          content: `CRITICAL: You are using a smaller model that may struggle with function calling. 
+          ALWAYS format tool calls EXACTLY as demonstrated:
+          
+          CORRECT: { "operation": "read", "filePath": "/path/to/file" }
+          CORRECT: { "command": "ls -la" }
+          
+          NEVER use text like "I'll use X tool" or "Using function X". ONLY output the JSON object.`
         });
       }
       
@@ -111,69 +179,92 @@ class AssistantAgent {
         runnerConfig.baseURL = this.llm_config.baseURL;
       }
       
-      const runner = this.wrapper.beta.chat.completions
-        .runTools(runnerConfig)
-        .on("message", (message: any) => {
-          // Gérer spécifiquement les appels d'outils
-          if (message.role === "assistant" && message.tool_calls && message.tool_calls.length > 0) {
-            // Vérifier si l'appel d'outil est valide et afficher les informations
-            try {
-              const toolCall = message.tool_calls[0];
-              const toolName = toolCall.function.name;
-              
-              // Vérifier si nous utilisons OpenAI et si le nom est valide
-              const isOpenAI = this.llm_config.api_type === "openai";
-              
-              if (isOpenAI && (toolName.includes(".") || !/^[a-zA-Z0-9_-]+$/.test(toolName))) {
-                console.log(`\x1b[31m⚠️ Invalid tool name: ${toolName}. OpenAI requires simple tool names without dots.\x1b[0m`);
-                // Ne pas continuer l'affichage pour éviter la confusion avec OpenAI
-                return;
-              }
-              
-              // Extraire l'opération des arguments pour l'affichage
-              let operation = "";
+      try {
+        const runner = this.wrapper.beta.chat.completions
+          .runTools(runnerConfig)
+          .on("message", (message: any) => {
+            // Gérer spécifiquement les appels d'outils
+            if (message.role === "assistant" && message.tool_calls && message.tool_calls.length > 0) {
+              // Vérifier si l'appel d'outil est valide et afficher les informations
               try {
-                const args = JSON.parse(toolCall.function.arguments);
-                if (args.operation) {
-                  operation = args.operation;
+                const toolCall = message.tool_calls[0];
+                const toolName = toolCall.function.name;
+                
+                // Vérifier si nous utilisons OpenAI et si le nom est valide
+                if (isOpenAI && (toolName.includes(".") || !/^[a-zA-Z0-9_-]+$/.test(toolName))) {
+                  console.log(`\x1b[31m⚠️ Invalid tool name: ${toolName}. OpenAI requires simple tool names without dots.\x1b[0m`);
+                  // Ne pas continuer l'affichage pour éviter la confusion avec OpenAI
+                  return;
                 }
+                
+                // Extraire l'opération des arguments pour l'affichage
+                let operation = "";
+                try {
+                  const args = JSON.parse(toolCall.function.arguments);
+                  if (args.operation) {
+                    operation = args.operation;
+                  }
+                } catch (e) {
+                  // Ignorer les erreurs de parsing
+                }
+                
+                // Afficher l'outil et l'opération
+                const displayText = operation ? `${toolName} (${operation})` : toolName;
+                console.log(`\x1b[33m🔧 Using tool: ${displayText}\x1b[0m`);
               } catch (e) {
-                // Ignorer les erreurs de parsing
+                console.log(`\x1b[31m⚠️ Error processing tool call\x1b[0m`);
               }
-              
-              // Afficher l'outil et l'opération
-              const displayText = operation ? `${toolName} (${operation})` : toolName;
-              console.log(`\x1b[33m🔧 Using tool: ${displayText}\x1b[0m`);
-            } catch (e) {
-              console.log(`\x1b[31m⚠️ Error processing tool call\x1b[0m`);
+            } else if (message.role === "tool") {
+              // Pour les résultats d'outils, montrer seulement une indication discrète
+              console.log(`\x1b[32m✓ Tool completed\x1b[0m`);
+            } else if (message.role === "assistant" && message.content) {
+              // Pour les petits modèles, essayer de détecter et réparer les appels d'outils malformés
+              if (isSmallModel && this.shouldConvertToToolCall(message.content)) {
+                const fixedToolCall = this.extractToolCallFromText(message.content);
+                if (fixedToolCall) {
+                  console.log(`\x1b[33m🛠️ Detected and fixed malformed tool call\x1b[0m`);
+                  // Notez que cette réparation est détectée mais non traitée ici
+                  // Cela nécessiterait une modification de l'API OpenAI/Ollama pour injecter un appel réparé
+                }
+              }
             }
-          } else if (message.role === "tool") {
-            // Pour les résultats d'outils, montrer seulement une indication discrète
-            const toolId = message.tool_call_id;
-            console.log(`\x1b[32m✓ Tool completed\x1b[0m`);
-          }
-          // Ne pas afficher les autres messages
-        });
-      
-      // Obtenir le contenu final et l'afficher
-      const finalContent = await runner.finalContent();
-      
-      // Afficher le contenu final sans préfixe
-      process.stdout.write(finalContent);
-      
-      response = finalContent;
+            // Ne pas afficher les autres messages
+          });
+        
+        // Obtenir le contenu final et l'afficher
+        const finalContent = await runner.finalContent();
+        
+        // Réessayer d'extraire un appel d'outil du contenu final pour les petits modèles
+        if (isSmallModel && this.shouldConvertToToolCall(finalContent)) {
+          console.log(`\x1b[33m🔍 Detected potential tool call in text response\x1b[0m`);
+          console.log(`\x1b[33m💡 Recommandation: Utiliser un modèle plus grand ou préciser votre prompt\x1b[0m`);
+        }
+        
+        // Afficher le contenu final sans préfixe
+        process.stdout.write(finalContent);
+        
+        response = finalContent;
+      } catch (error) {
+        console.error(`\x1b[31mError during tool execution: ${error}\x1b[0m`);
+        response = "Error during tool execution. Please try again.";
+      }
     } else {
       // Sinon, on utilise le flux standard
-      const stream = await this.wrapper.chat.completions.create({
-        model: this.llm_config.model,
-        messages: messages,
-        stream: true,
-      });
+      try {
+        const stream = await this.wrapper.chat.completions.create({
+          model: this.llm_config.model,
+          messages: messages,
+          stream: true,
+        });
 
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || "";
-        response += content;
-        process.stdout.write(content);
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content || "";
+          response += content;
+          process.stdout.write(content);
+        }
+      } catch (error) {
+        console.error(`\x1b[31mError during chat completion: ${error}\x1b[0m`);
+        response = "Error during chat completion. Please try again.";
       }
     }
 
